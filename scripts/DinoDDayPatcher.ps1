@@ -57,17 +57,24 @@ $T0_PATCHED  = [byte[]](0x36,0xC6,0x40,0x05,0x18,0x36,0xC6,0x40,0x06,0x18,0xC3,0
 $T0_ORIGINAL = [byte[]](0xC3,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC)
 $T0_MIN_THREADS = 28
 
-# Config tweaks. 'Default' seeds the toggles on first run.
-$TWEAKS = @(
-    @{ Key='warmup';   Default=$true;  Line='ddd_player_waittime "0"'
-       Desc='Skip warmup rounds on private maps' }
-    @{ Key='bright';   Default=$false; Line='mat_tonemapping_occlusion_use_stencil "1"'
-       Desc='Brightness fix (some Intel systems render too dark)' }
-    @{ Key='download'; Default=$true;  Line='cl_downloadfilter "all"'
-       Desc='Allow downloading maps and sprays' }
-    @{ Key='spraybind';Default=$true;  Line='bind {0} "impulse 201"'
-       Desc='Bind a key to spray'; HasArg=$true; Arg='g' }
-)
+# Config tweaks. Built fresh by New-TweakList so each call gets its own
+# hashtables -- no cloning, no shared state between menu visits.
+function New-TweakList {
+    $list = @()
+    $list += @{ Enabled = $true;  HasArg = $false; Arg = '';
+                Desc = 'Skip warmup rounds on private maps';
+                Line = 'ddd_player_waittime "0"' }
+    $list += @{ Enabled = $false; HasArg = $false; Arg = '';
+                Desc = 'Brightness fix (some Intel systems render too dark)';
+                Line = 'mat_tonemapping_occlusion_use_stencil "1"' }
+    $list += @{ Enabled = $true;  HasArg = $false; Arg = '';
+                Desc = 'Allow downloading maps and sprays';
+                Line = 'cl_downloadfilter "all"' }
+    $list += @{ Enabled = $true;  HasArg = $true;  Arg = 'g';
+                Desc = 'Bind a key to spray';
+                Line = 'bind {0} "impulse 201"' }
+    return $list
+}
 
 # ------------------------------------------------------------------ utilities
 
@@ -330,35 +337,43 @@ function Remove-ConfigBlock($root) {
 }
 
 function Invoke-ConfigMenu($root) {
-    $tweaks = @()
-    foreach ($t in $TWEAKS) {
-        $c = $t.Clone()
-        $c.Enabled = $t.Default
-        $tweaks += $c
+    $tweaks = @(New-TweakList)
+
+    if ($tweaks.Count -eq 0) {
+        Write-Bad "tweak list came back empty -- New-TweakList is not returning anything"
+        return
     }
 
     while ($true) {
-        Write-Host "`n  Config tweaks -- toggle by number, 'a' to apply, 'q' to go back`n"
+        Write-Host ''
+        Write-Host "  Config tweaks for autoexec.cfg"
+        Write-Host "  toggle by number, 'a' to apply, 'q' to go back"
+        Write-Host ''
+
         for ($i = 0; $i -lt $tweaks.Count; $i++) {
-            $t = $tweaks[$i]
-            $mark = if ($t.Enabled) { 'x' } else { ' ' }
-            $extra = if ($t.HasArg) { " (key: $($t.Arg))" } else { '' }
-            Write-Host ("    [{0}] {1}. {2}{3}" -f $mark, ($i+1), $t.Desc, $extra)
+            $mark = ' '
+            if ($tweaks[$i].Enabled) { $mark = 'x' }
+            $label = $tweaks[$i].Desc
+            if ($tweaks[$i].HasArg) { $label = "$label (key: $($tweaks[$i].Arg))" }
+            Write-Host ("    [$mark] " + ($i + 1) + ". " + $label)
         }
+
         Write-Host ''
         $a = (Read-Host "  choice").Trim().ToLower()
 
         if ($a -eq 'q') { return }
         if ($a -eq 'a') { Write-ConfigBlock $root $tweaks; return }
+
         if ($a -match '^\d+$') {
             $idx = [int]$a - 1
             if ($idx -ge 0 -and $idx -lt $tweaks.Count) {
-                $t = $tweaks[$idx]
-                $t.Enabled = -not $t.Enabled
-                if ($t.Enabled -and $t.HasArg) {
-                    $k = (Read-Host "  key to bind (blank keeps '$($t.Arg)')").Trim()
-                    if ($k -ne '') { $t.Arg = $k.ToLower() }
+                $tweaks[$idx].Enabled = -not $tweaks[$idx].Enabled
+                if ($tweaks[$idx].Enabled -and $tweaks[$idx].HasArg) {
+                    $k = (Read-Host "  key to bind (blank keeps '$($tweaks[$idx].Arg)')").Trim()
+                    if ($k -ne '') { $tweaks[$idx].Arg = $k.ToLower() }
                 }
+            } else {
+                Write-Warn2 "no such option"
             }
         }
     }
