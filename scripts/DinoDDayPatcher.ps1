@@ -82,6 +82,24 @@ function Write-Good($m) { Write-Host "  $m" -ForegroundColor Green }
 function Write-Bad($m)  { Write-Host "  $m" -ForegroundColor Red }
 function Write-Warn2($m){ Write-Host "  $m" -ForegroundColor Yellow }
 function Write-Step($m) { Write-Host "  $m" }
+function Write-Header($m) { Write-Host "  $m" -ForegroundColor DarkCyan }
+function Write-Alert($m)  { Write-Host "  WARNING: $m" -ForegroundColor Red }
+
+# True only if the file can be opened for writing with no other handles on it.
+# FileShare::None makes this fail while a hex editor, Explorer preview pane or
+# an antivirus scan is holding the file.
+function Test-FileWritable($path) {
+    try {
+        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open,
+                                     [System.IO.FileAccess]::ReadWrite,
+                                     [System.IO.FileShare]::None)
+        $fs.Close()
+        $fs.Dispose()
+        return $true
+    } catch {
+        return $false
+    }
+}
 
 function Read-YesNo($prompt, $default = $false) {
     $hint = if ($default) { '[Y/n]' } else { '[y/N]' }
@@ -346,8 +364,8 @@ function Invoke-ConfigMenu($root) {
 
     while ($true) {
         Write-Host ''
-        Write-Host "  Config tweaks for autoexec.cfg"
-        Write-Host "  toggle by number, 'a' to apply, 'q' to go back"
+        Write-Header "Config tweaks for autoexec.cfg"
+        Write-Header "toggle by number, 'a' to apply, 'q' to go back"
         Write-Host ''
 
         for ($i = 0; $i -lt $tweaks.Count; $i++) {
@@ -405,11 +423,18 @@ function Install-Tier0Patch($root) {
         if (-not (Read-YesNo "Apply anyway?" $false)) { return }
     }
 
+    if (-not (Test-FileWritable $f)) {
+        Write-Bad "cannot get write access to $T0_REL"
+        Write-Step "it is open in another program -- close any hex editor, Explorer"
+        Write-Step "preview pane, or antivirus scan holding it, then try again."
+        return
+    }
+
     Write-Host ''
-    Write-Warn2 "This modifies a game DLL. Dino D-Day has VAC enabled, so"
-    Write-Warn2 "modifying game files carries a risk of a VAC ban. The community"
-    Write-Warn2 "runs this patch widely without reported problems, but the risk"
-    Write-Warn2 "is yours to take."
+    Write-Alert "This modifies a game DLL. Dino D-Day has VAC enabled, so"
+    Write-Alert "modifying game files carries a risk of a VAC ban. The community"
+    Write-Alert "runs this patch widely without reported problems, but the risk"
+    Write-Alert "is yours to take."
     Write-Host ''
     if (-not (Read-YesNo "Understood -- proceed?" $false)) { return }
 
@@ -432,14 +457,20 @@ function Install-Tier0Patch($root) {
     }
 
     $backup = Join-Path $root $T0_BACKUP
-    if (-not (Test-Path $backup)) {
-        Copy-Item $f $backup -Force
-        Write-Good "backed up to $T0_BACKUP"
-    }
+    try {
+        if (-not (Test-Path $backup)) {
+            Copy-Item $f $backup -Force
+            Write-Good "backed up to $T0_BACKUP"
+        }
 
-    $b = [System.IO.File]::ReadAllBytes($f)
-    for ($i = 0; $i -lt $T0_PATCHED.Length; $i++) { $b[$T0_OFFSET + $i] = $T0_PATCHED[$i] }
-    [System.IO.File]::WriteAllBytes($f, $b)
+        $b = [System.IO.File]::ReadAllBytes($f)
+        for ($i = 0; $i -lt $T0_PATCHED.Length; $i++) { $b[$T0_OFFSET + $i] = $T0_PATCHED[$i] }
+        [System.IO.File]::WriteAllBytes($f, $b)
+    } catch {
+        Write-Bad "patch failed: $($_.Exception.Message)"
+        Write-Step "nothing was changed, or the backup at $T0_BACKUP has the original."
+        return
+    }
 
     if ((Get-Tier0Status $root) -eq 'applied') {
         Write-Good "patch applied and verified"
@@ -453,29 +484,45 @@ function Uninstall-Tier0Patch($root) {
     $f = Join-Path $root $T0_REL
     $backup = Join-Path $root $T0_BACKUP
 
-    if (Test-Path $backup) {
-        if ((Get-FileHash $backup -Algorithm SHA256).Hash -eq $T0_SHA256) {
-            Copy-Item $backup $f -Force
-            Write-Good "restored original from backup"
-            return
-        }
-        Write-Warn2 "backup does not match the known original hash; not using it"
+    if (-not (Test-Path $f)) { Write-Bad "$T0_REL not found"; return }
+
+    if (-not (Test-FileWritable $f)) {
+        Write-Bad "cannot get write access to $T0_REL"
+        Write-Step "it is open in another program -- close any hex editor, Explorer"
+        Write-Step "preview pane, or antivirus scan holding it, then try again."
+        return
     }
 
-    if ((Get-Tier0Status $root) -ne 'applied') { Write-Warn2 "not patched"; return }
-    $b = [System.IO.File]::ReadAllBytes($f)
-    for ($i = 0; $i -lt $T0_ORIGINAL.Length; $i++) { $b[$T0_OFFSET + $i] = $T0_ORIGINAL[$i] }
-    [System.IO.File]::WriteAllBytes($f, $b)
-    Write-Good "bytes restored in place"
-    Write-Step "run Steam's 'Verify integrity of game files' to be certain"
+    try {
+        if (Test-Path $backup) {
+            if ((Get-FileHash $backup -Algorithm SHA256).Hash -eq $T0_SHA256) {
+                Copy-Item $backup $f -Force
+                Write-Good "restored original from backup"
+                return
+            }
+            Write-Warn2 "backup does not match the known original hash; not using it"
+        }
+
+        if ((Get-Tier0Status $root) -ne 'applied') { Write-Warn2 "not patched"; return }
+        $b = [System.IO.File]::ReadAllBytes($f)
+        for ($i = 0; $i -lt $T0_ORIGINAL.Length; $i++) { $b[$T0_OFFSET + $i] = $T0_ORIGINAL[$i] }
+        [System.IO.File]::WriteAllBytes($f, $b)
+        Write-Good "bytes restored in place"
+        Write-Step "run Steam's 'Verify integrity of game files' to be certain"
+    } catch {
+        Write-Bad "revert failed: $($_.Exception.Message)"
+        Write-Step "the original is still at $T0_BACKUP if you need it."
+    }
 }
 
 # ------------------------------------------------------------------- main menu
 
 function Show-Status($root) {
     $threads = Get-LogicalProcessorCount
-    Write-Host "`n  Install : $root"
-    Write-Host "  CPU     : $threads logical processors`n"
+    Write-Host ''
+    Write-Header "Install : $root"
+    Write-Header "CPU     : $threads logical processors"
+    Write-Host ''
     Write-Host "    1. Spray fix ............ [$(Get-SprayStatus $root)]"
     Write-Host "    2. Config tweaks ........ [$(Get-ConfigStatus $root)]"
     $t0 = Get-Tier0Status $root
@@ -491,34 +538,40 @@ function Invoke-Menu($root) {
         Write-Host "    0. Exit`n"
         $a = (Read-Host "  choice").Trim()
 
-        switch ($a) {
-            '1' {
-                if ((Get-SprayStatus $root) -eq 'installed') {
-                    if (Read-YesNo "Spray fix is installed. Remove it?" $false) {
-                        Uninstall-SprayFix $root
-                    }
-                } else { Install-SprayFix $root }
-            }
-            '2' {
-                if ((Get-ConfigStatus $root) -eq 'installed') {
-                    if (Read-YesNo "Config block exists. Remove it? (no = edit)" $false) {
-                        Remove-ConfigBlock $root
+        try {
+            switch ($a) {
+                '1' {
+                    if ((Get-SprayStatus $root) -eq 'installed') {
+                        if (Read-YesNo "Spray fix is installed. Remove it?" $false) {
+                            Uninstall-SprayFix $root
+                        }
+                    } else { Install-SprayFix $root }
+                }
+                '2' {
+                    if ((Get-ConfigStatus $root) -eq 'installed') {
+                        if (Read-YesNo "Config block exists. Remove it? (no = edit)" $false) {
+                            Remove-ConfigBlock $root
+                        } else { Invoke-ConfigMenu $root }
                     } else { Invoke-ConfigMenu $root }
-                } else { Invoke-ConfigMenu $root }
+                }
+                '3' {
+                    if ((Get-Tier0Status $root) -eq 'applied') {
+                        if (Read-YesNo "Thread-count fix is applied. Revert it?" $false) {
+                            Uninstall-Tier0Patch $root
+                        }
+                    } else { Install-Tier0Patch $root }
+                }
+                '4' { Clear-SprayCache $root }
+                '5' {
+                    $n = Resolve-GameRoot $null
+                    if ($n) { $root = $n }
+                }
+                '0' { return }
             }
-            '3' {
-                if ((Get-Tier0Status $root) -eq 'applied') {
-                    if (Read-YesNo "Thread-count fix is applied. Revert it?" $false) {
-                        Uninstall-Tier0Patch $root
-                    }
-                } else { Install-Tier0Patch $root }
-            }
-            '4' { Clear-SprayCache $root }
-            '5' {
-                $n = Resolve-GameRoot $null
-                if ($n) { $root = $n }
-            }
-            '0' { return }
+        } catch {
+            Write-Host ''
+            Write-Bad "that action failed: $($_.Exception.Message)"
+            Write-Step "nothing further was changed. Returning to the menu."
         }
     }
 }
