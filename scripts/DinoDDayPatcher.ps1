@@ -82,7 +82,7 @@ function Write-Good($m) { Write-Host "  $m" -ForegroundColor Green }
 function Write-Bad($m)  { Write-Host "  $m" -ForegroundColor Red }
 function Write-Warn2($m){ Write-Host "  $m" -ForegroundColor Yellow }
 function Write-Step($m) { Write-Host "  $m" }
-function Write-Header($m) { Write-Host "  $m" -ForegroundColor DarkCyan }
+function Write-Header($m) { Write-Host "  $m" -ForegroundColor Cyan }
 function Write-Alert($m)  { Write-Host "  WARNING: $m" -ForegroundColor Red }
 
 # True only if the file can be opened for writing with no other handles on it.
@@ -190,6 +190,16 @@ function Test-GameRoot($p) {
     return ($p -and (Test-Path (Join-Path $p 'dinodday\gameinfo.txt')))
 }
 
+function Read-GameRootPrompt($current) {
+    if ($current) { Write-Step "current: $current" }
+    while ($true) {
+        $in = (Read-Host "  Install root (blank to cancel)").Trim('"', ' ')
+        if ($in -eq '') { return $null }
+        if (Test-GameRoot $in) { return (Resolve-Path $in).Path }
+        Write-Bad "no dinodday\gameinfo.txt there -- try again"
+    }
+}
+
 function Resolve-GameRoot($explicit) {
     if ($explicit) {
         if (-not (Test-GameRoot $explicit)) {
@@ -201,12 +211,7 @@ function Resolve-GameRoot($explicit) {
     if (Test-GameRoot $r) { return $r }
 
     Write-Warn2 "could not auto-detect the install."
-    while ($true) {
-        $in = (Read-Host "  Install root (blank to quit)").Trim('"',' ')
-        if ($in -eq '') { return $null }
-        if (Test-GameRoot $in) { return (Resolve-Path $in).Path }
-        Write-Bad "no dinodday\gameinfo.txt there -- try again"
-    }
+    return Read-GameRootPrompt $null
 }
 
 # ------------------------------------------------------------------ spray fix
@@ -528,6 +533,7 @@ function Show-Status($root) {
     $t0 = Get-Tier0Status $root
     $note = if ($threads -gt $T0_MIN_THREADS) { '  <- recommended for this CPU' } else { '  (not needed)' }
     Write-Host "    3. Thread-count fix ..... [$t0]$note"
+    Write-Host "       [Fixes crash on map load on high end CPUs]" -ForegroundColor DarkGray
 }
 
 function Invoke-Menu($root) {
@@ -563,8 +569,13 @@ function Invoke-Menu($root) {
                 }
                 '4' { Clear-SprayCache $root }
                 '5' {
-                    $n = Resolve-GameRoot $null
-                    if ($n) { $root = $n }
+                    $n = Read-GameRootPrompt $root
+                    if ($n) {
+                        $root = $n
+                        Write-Good "install path changed"
+                    } else {
+                        Write-Step "path unchanged"
+                    }
                 }
                 '0' { return }
             }
