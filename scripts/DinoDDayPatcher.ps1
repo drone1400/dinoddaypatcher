@@ -234,6 +234,18 @@ function Get-SprayStatus($root) {
     return 'wrong target'
 }
 
+function Show-SprayInfo {
+    Write-Host ''
+    Write-Header "Getting your own spray on DinoTown"
+    Write-Host ''
+    Write-Step "Sprays have to be added to the server before anyone can see them."
+    Write-Step "If you want yours added, contact one of the server admins on Steam"
+    Write-Step "or on Discord -- invite at http://dinotown.net/discord"
+    Write-Host ''
+    Write-Warn2 "NSFW, gore or otherwise illegal content is not allowed in sprays."
+    Write-Host ''
+}
+
 function Install-SprayFix($root) {
     if (Test-GameRunning) { return }
     $p = Get-SprayPaths $root
@@ -245,7 +257,11 @@ function Install-SprayFix($root) {
 
     $existing = Get-Item $p.Link -Force -ErrorAction SilentlyContinue
     if ($existing -and $existing.LinkType -eq 'Junction') {
-        if ($existing.Target -contains $p.Target) { Write-Good "already installed"; return }
+        if ($existing.Target -contains $p.Target) {
+            Write-Good "already installed"
+            Show-SprayInfo
+            return
+        }
         Write-Warn2 "replacing junction pointing at $($existing.Target)"
         [System.IO.Directory]::Delete($p.Link, $false)
     } elseif ($existing) {
@@ -267,6 +283,7 @@ function Install-SprayFix($root) {
     if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     New-Item -ItemType Junction -Path $p.Link -Target $p.Target | Out-Null
     Write-Good "junction created: $($p.Link) -> $($p.Target)"
+    Show-SprayInfo
 }
 
 function Uninstall-SprayFix($root) {
@@ -529,7 +546,9 @@ function Show-Status($root) {
     Write-Header "CPU     : $threads logical processors"
     Write-Host ''
     Write-Host "    1. Spray fix ............ [$(Get-SprayStatus $root)]"
+    Write-Host "       [Lets server-delivered custom sprays download and render]" -ForegroundColor DarkGray
     Write-Host "    2. Config tweaks ........ [$(Get-ConfigStatus $root)]"
+    Write-Host "       [Optional fixes and binds written to cfg\autoexec.cfg]" -ForegroundColor DarkGray
     $t0 = Get-Tier0Status $root
     $note = if ($threads -gt $T0_MIN_THREADS) { '  <- recommended for this CPU' } else { '  (not needed)' }
     Write-Host "    3. Thread-count fix ..... [$t0]$note"
