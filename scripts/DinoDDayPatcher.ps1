@@ -133,6 +133,29 @@ function Write-Warn2($m){ Write-Host "  $m" -ForegroundColor Yellow }
 function Write-Step($m) { Write-Host "  $m" }
 function Write-Header($m) { Write-Host "  $m" -ForegroundColor Cyan }
 function Write-Alert($m)  { Write-Host "  WARNING: $m" -ForegroundColor Red }
+# Continuation lines for a multi-line alert, indented to line up under the text.
+function Write-AlertLine($m) { Write-Host "           $m" -ForegroundColor Red }
+
+# Reads $count bytes at $offset without pulling the whole file into memory.
+# Opens with FileShare::ReadWrite so status checks still work while something
+# else has the file open. Returns $null if the read cannot be satisfied.
+function Read-FileBytes($path, $offset, $count) {
+    $fs = $null
+    try {
+        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open,
+                                     [System.IO.FileAccess]::Read,
+                                     [System.IO.FileShare]::ReadWrite)
+        if ($fs.Length -lt ($offset + $count)) { return $null }
+        $fs.Position = $offset
+        $buf = New-Object byte[] $count
+        if ($fs.Read($buf, 0, $count) -ne $count) { return $null }
+        return $buf
+    } catch {
+        return $null
+    } finally {
+        if ($fs) { $fs.Dispose() }
+    }
+}
 
 # True only if the file can be opened for writing with no other handles on it.
 # FileShare::None makes this fail while a hex editor, Explorer preview pane or
@@ -160,13 +183,20 @@ function Read-YesNo($prompt, $default = $false) {
     }
 }
 
+# The CPU does not change while the script runs, and the WMI query is slow
+# enough to be noticeable on every menu redraw.
+$script:CachedThreads = 0
+
 function Get-LogicalProcessorCount {
+    if ($script:CachedThreads -gt 0) { return $script:CachedThreads }
+    $n = 0
     try {
         $n = (Get-CimInstance Win32_Processor |
               Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
-        if ($n -gt 0) { return [int]$n }
     } catch { }
-    return [int][Environment]::ProcessorCount
+    if (-not $n -or $n -le 0) { $n = [int][Environment]::ProcessorCount }
+    $script:CachedThreads = [int]$n
+    return $script:CachedThreads
 }
 
 function Test-GameRunning {
@@ -499,9 +529,8 @@ function Invoke-ConfigMenu($root) {
 function Get-Tier0Status($root) {
     $f = Join-Path $root $T0_REL
     if (-not (Test-Path $f)) { return 'missing' }
-    $b = [System.IO.File]::ReadAllBytes($f)
-    if ($b.Length -lt ($T0_OFFSET + $T0_PATCHED.Length)) { return 'unrecognised' }
-    $cur = $b[$T0_OFFSET..($T0_OFFSET + $T0_PATCHED.Length - 1)]
+    $cur = Read-FileBytes $f $T0_OFFSET $T0_PATCHED.Length
+    if ($null -eq $cur) { return 'unreadable' }
     if (-not (Compare-Object $cur $T0_PATCHED))  { return 'applied' }
     if (-not (Compare-Object $cur $T0_ORIGINAL)) { return 'not applied' }
     return 'unrecognised'
@@ -528,10 +557,10 @@ function Install-Tier0Patch($root) {
     }
 
     Write-Host ''
-    Write-Alert "This modifies a game DLL. Dino D-Day has VAC enabled, so"
-    Write-Alert "modifying game files carries a risk of a VAC ban. The community"
-    Write-Alert "runs this patch widely without reported problems, but the risk"
-    Write-Alert "is yours to take."
+    Write-Alert     "This modifies a game DLL. Dino D-Day has VAC enabled, so"
+    Write-AlertLine "modifying game files carries a risk of a VAC ban. The community"
+    Write-AlertLine "runs this patch widely without reported problems, but the risk"
+    Write-AlertLine "is yours to take."
     Write-Host ''
     if (-not (Read-YesNo "Understood -- proceed?" $false)) { return }
 
@@ -548,8 +577,8 @@ function Install-Tier0Patch($root) {
         if (-not (Read-YesNo "Proceed regardless?" $false)) { return }
     }
 
-    if ($status -eq 'unrecognised') {
-        Write-Bad "bytes at 0x$('{0:X}' -f $T0_OFFSET) are neither original nor patched -- refusing"
+    if ($status -ne 'not applied') {
+        Write-Bad "bytes at 0x$('{0:X}' -f $T0_OFFSET) are not the expected original ($status) -- refusing"
         return
     }
 
