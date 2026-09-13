@@ -59,21 +59,70 @@ $T0_MIN_THREADS = 28
 
 # Config tweaks. Built fresh by New-TweakList so each call gets its own
 # hashtables -- no cloning, no shared state between menu visits.
+# ArgType: 'none', 'key' (a bind key), or 'logofile' (a path under dinodday\).
+# {0} in a line is replaced with Arg.
 function New-TweakList {
     $list = @()
-    $list += @{ Enabled = $true;  HasArg = $false; Arg = '';
+    $list += @{ Enabled = $true;  ArgType = 'none'; Arg = '';
                 Desc = 'Skip warmup rounds on private maps';
-                Line = 'ddd_player_waittime "0"' }
-    $list += @{ Enabled = $false; HasArg = $false; Arg = '';
+                Lines = @('ddd_player_waittime "0"') }
+    $list += @{ Enabled = $false; ArgType = 'none'; Arg = '';
                 Desc = 'Brightness fix (some Intel systems render too dark)';
-                Line = 'mat_tonemapping_occlusion_use_stencil "1"' }
-    $list += @{ Enabled = $true;  HasArg = $false; Arg = '';
+                Lines = @('mat_tonemapping_occlusion_use_stencil "1"') }
+    $list += @{ Enabled = $true;  ArgType = 'none'; Arg = '';
                 Desc = 'Allow downloading maps and sprays';
-                Line = 'cl_downloadfilter "all"' }
-    $list += @{ Enabled = $true;  HasArg = $true;  Arg = 'g';
+                Lines = @('cl_downloadfilter "all"', 'cl_allowdownload "1"') }
+    $list += @{ Enabled = $true;  ArgType = 'none'; Arg = '';
+                Desc = "Show other players' sprays";
+                Lines = @('cl_playerspraydisable "0"') }
+    $list += @{ Enabled = $true;  ArgType = 'key';  Arg = 'g';
                 Desc = 'Bind a key to spray';
-                Line = 'bind {0} "impulse 201"' }
+                Lines = @('bind {0} "impulse 201"') }
+    $list += @{ Enabled = $false; ArgType = 'logofile'; Arg = '';
+                Desc = 'Use a custom spray file';
+                Lines = @('cl_logofile "{0}"') }
     return $list
+}
+
+# Prompts for a spray file and returns it as a forward-slash path relative to
+# the dinodday folder, which is what cl_logofile expects.
+function Read-LogoFile($root) {
+    $modRoot = (Resolve-Path (Join-Path $root 'dinodday')).Path
+    $prefix  = $modRoot.TrimEnd('\') + '\'
+
+    Write-Step "Spray file -- absolute path, or relative to the dinodday folder."
+    Write-Step "e.g. materials\vgui\logos\mine.vtf"
+
+    while ($true) {
+        $in = (Read-Host "  spray file (blank to cancel)").Trim('"', ' ')
+        if ($in -eq '') { return $null }
+
+        if ([System.IO.Path]::IsPathRooted($in)) { $full = $in }
+        else { $full = Join-Path $modRoot $in }
+
+        if (-not (Test-Path $full -PathType Leaf)) {
+            Write-Bad "no file at $full"
+            continue
+        }
+        $full = (Resolve-Path $full).Path
+
+        if (-not $full.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Write-Bad "that file is outside $modRoot"
+            Write-Step "cl_logofile paths are read relative to the dinodday folder,"
+            Write-Step "so copy the file in there first, then pick it again."
+            continue
+        }
+
+        $rel = $full.Substring($prefix.Length) -replace '\\', '/'
+
+        if ($rel -notmatch '\.vtf$') {
+            Write-Warn2 "that is not a .vtf file -- the game will not load it as a spray"
+            if (-not (Read-YesNo "Use it anyway?" $false)) { continue }
+        }
+
+        Write-Good "using $rel"
+        return $rel
+    }
 }
 
 # ------------------------------------------------------------------ utilities
@@ -347,9 +396,11 @@ function Write-ConfigBlock($root, $tweaks) {
     $block = @($CFG_BEGIN, "// generated $(Get-Date -Format 'yyyy-MM-dd HH:mm')")
     foreach ($t in $tweaks) {
         if (-not $t.Enabled) { continue }
-        $line = if ($t.HasArg) { $t.Line -f $t.Arg } else { $t.Line }
         $block += "// $($t.Desc)"
-        $block += $line
+        foreach ($l in $t.Lines) {
+            if ($t.ArgType -ne 'none') { $block += ($l -f $t.Arg) }
+            else { $block += $l }
+        }
     }
     $block += $CFG_END
 
@@ -394,7 +445,13 @@ function Invoke-ConfigMenu($root) {
             $mark = ' '
             if ($tweaks[$i].Enabled) { $mark = 'x' }
             $label = $tweaks[$i].Desc
-            if ($tweaks[$i].HasArg) { $label = "$label (key: $($tweaks[$i].Arg))" }
+            if ($tweaks[$i].ArgType -eq 'key') {
+                $label = "$label (key: $($tweaks[$i].Arg))"
+            } elseif ($tweaks[$i].ArgType -eq 'logofile') {
+                $shown = $tweaks[$i].Arg
+                if (-not $shown) { $shown = 'none picked' }
+                $label = "$label ($shown)"
+            }
             Write-Host ("    [$mark] " + ($i + 1) + ". " + $label)
         }
 
@@ -402,15 +459,33 @@ function Invoke-ConfigMenu($root) {
         $a = (Read-Host "  choice").Trim().ToLower()
 
         if ($a -eq 'q') { return }
-        if ($a -eq 'a') { Write-ConfigBlock $root $tweaks; return }
+
+        if ($a -eq 'a') {
+            $missing = @($tweaks | Where-Object {
+                $_.Enabled -and $_.ArgType -eq 'logofile' -and -not $_.Arg
+            })
+            if ($missing.Count -gt 0) {
+                Write-Bad "no spray file picked -- choose one or turn that option off"
+                continue
+            }
+            Write-ConfigBlock $root $tweaks
+            return
+        }
 
         if ($a -match '^\d+$') {
             $idx = [int]$a - 1
             if ($idx -ge 0 -and $idx -lt $tweaks.Count) {
                 $tweaks[$idx].Enabled = -not $tweaks[$idx].Enabled
-                if ($tweaks[$idx].Enabled -and $tweaks[$idx].HasArg) {
+
+                if ($tweaks[$idx].Enabled -and $tweaks[$idx].ArgType -eq 'key') {
                     $k = (Read-Host "  key to bind (blank keeps '$($tweaks[$idx].Arg)')").Trim()
                     if ($k -ne '') { $tweaks[$idx].Arg = $k.ToLower() }
+                }
+
+                if ($tweaks[$idx].Enabled -and $tweaks[$idx].ArgType -eq 'logofile') {
+                    $f = Read-LogoFile $root
+                    if ($f) { $tweaks[$idx].Arg = $f }
+                    else { $tweaks[$idx].Enabled = $false }
                 }
             } else {
                 Write-Warn2 "no such option"
