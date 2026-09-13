@@ -1,0 +1,525 @@
+<#
+.SYNOPSIS
+    DinoDDayPatcher -- applies community fixes to a Dino D-Day install.
+
+.DESCRIPTION
+    Run with no arguments for an interactive menu.
+
+    Patches:
+      1. Spray fix       -- junction so server-delivered sprays render
+      2. Config tweaks   -- managed block in cfg\autoexec.cfg
+      3. Thread-count fix -- patches bin\tier0.dll for CPUs with >28 threads
+
+.PARAMETER Path
+    Install root (the folder containing 'dinodday'). Auto-detected if omitted.
+
+.PARAMETER Status
+    Print the status of every patch and exit.
+
+.PARAMETER Revert
+    Non-interactive: remove the spray junction.
+
+.PARAMETER ClearCache
+    Non-interactive: wipe the spray caches.
+
+.NOTES
+    Close the game before running. Junctions and config edits need no
+    elevation; the DLL patch needs write access to the install folder.
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Position = 0)][Alias('p')][string]$Path,
+    [Alias('s')][switch]$Status,
+    [Alias('r')][switch]$Revert,
+    [Alias('c', 'Clear')][switch]$ClearCache,
+    [Alias('h', '?')][switch]$Help
+)
+
+$ErrorActionPreference = 'Stop'
+
+# ------------------------------------------------------------------ constants
+
+$APPID = 70000
+
+$CFG_BEGIN = '// >>> DinoDDayPatcher >>>'
+$CFG_END   = '// <<< DinoDDayPatcher <<<'
+
+# bin\tier0.dll thread-count patch.
+# Rewrites the tail of GetCPUInformation to clamp the reported logical and
+# physical processor counts to 0x18 (24), working around a crash on CPUs
+# with more than 28 threads.
+$T0_REL      = 'bin\tier0.dll'
+$T0_BACKUP   = 'bin\tier0.dll.dinopatcher.bak'
+$T0_SHA256   = '4FF85A018222C46A3E6B3EDA81EF37E345F67CEAC544551161AAE5AA32F3AE8A'
+$T0_OFFSET   = 0x2193
+$T0_PATCHED  = [byte[]](0x36,0xC6,0x40,0x05,0x18,0x36,0xC6,0x40,0x06,0x18,0xC3,0x90,0x90)
+$T0_ORIGINAL = [byte[]](0xC3,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC)
+$T0_MIN_THREADS = 28
+
+# Config tweaks. 'Default' seeds the toggles on first run.
+$TWEAKS = @(
+    @{ Key='warmup';   Default=$true;  Line='ddd_player_waittime "0"'
+       Desc='Skip warmup rounds on private maps' }
+    @{ Key='bright';   Default=$false; Line='mat_tonemapping_occlusion_use_stencil "1"'
+       Desc='Brightness fix (some Intel systems render too dark)' }
+    @{ Key='download'; Default=$true;  Line='cl_downloadfilter "all"'
+       Desc='Allow downloading maps and sprays' }
+    @{ Key='spraybind';Default=$true;  Line='bind {0} "impulse 201"'
+       Desc='Bind a key to spray'; HasArg=$true; Arg='g' }
+)
+
+# ------------------------------------------------------------------ utilities
+
+function Write-Good($m) { Write-Host "  $m" -ForegroundColor Green }
+function Write-Bad($m)  { Write-Host "  $m" -ForegroundColor Red }
+function Write-Warn2($m){ Write-Host "  $m" -ForegroundColor Yellow }
+function Write-Step($m) { Write-Host "  $m" }
+
+function Read-YesNo($prompt, $default = $false) {
+    $hint = if ($default) { '[Y/n]' } else { '[y/N]' }
+    while ($true) {
+        $a = (Read-Host "  $prompt $hint").Trim().ToLower()
+        if ($a -eq '')                 { return $default }
+        if ($a -in @('y','yes'))       { return $true }
+        if ($a -in @('n','no'))        { return $false }
+    }
+}
+
+function Get-LogicalProcessorCount {
+    try {
+        $n = (Get-CimInstance Win32_Processor |
+              Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
+        if ($n -gt 0) { return [int]$n }
+    } catch { }
+    return [int][Environment]::ProcessorCount
+}
+
+function Test-GameRunning {
+    $p = Get-Process -Name 'dinodday','hl2','srcds' -ErrorAction SilentlyContinue
+    if ($p) {
+        Write-Bad "close the game first ($($p.Name -join ', ') running)"
+        return $true
+    }
+    return $false
+}
+
+# ------------------------------------------------------------------ detection
+
+function Get-SteamRoot {
+    foreach ($k in @('HKCU:\Software\Valve\Steam',
+                     'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam',
+                     'HKLM:\SOFTWARE\Valve\Steam')) {
+        try {
+            $p = Get-ItemProperty -Path $k -ErrorAction Stop
+            foreach ($prop in @('SteamPath','InstallPath')) {
+                if ($p.$prop -and (Test-Path $p.$prop)) { return (Resolve-Path $p.$prop).Path }
+            }
+        } catch { }
+    }
+    return $null
+}
+
+function Get-SteamLibraries($steamRoot) {
+    $libs = @()
+    if ($steamRoot) { $libs += (Join-Path $steamRoot 'steamapps') }
+    $vdf = Join-Path $steamRoot 'steamapps\libraryfolders.vdf'
+    if (Test-Path $vdf) {
+        foreach ($line in Get-Content $vdf) {
+            if ($line -match '"(?:path|\d+)"\s+"(.+?)"') {
+                $sa = Join-Path ($matches[1] -replace '\\\\','\') 'steamapps'
+                if (Test-Path $sa) { $libs += $sa }
+            }
+        }
+    }
+    return $libs | Select-Object -Unique
+}
+
+function Find-GameRoot {
+    foreach ($base in @(
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')) {
+        try {
+            $p = Get-ItemProperty -Path (Join-Path $base "Steam App $APPID") -ErrorAction Stop
+            if ($p.InstallLocation -and (Test-Path $p.InstallLocation)) {
+                return (Resolve-Path $p.InstallLocation).Path
+            }
+        } catch { }
+    }
+    $sr = Get-SteamRoot
+    if (-not $sr) { return $null }
+    foreach ($lib in (Get-SteamLibraries $sr)) {
+        $acf = Join-Path $lib "appmanifest_$APPID.acf"
+        if (-not (Test-Path $acf)) { continue }
+        foreach ($line in Get-Content $acf) {
+            if ($line -match '"installdir"\s+"(.+?)"') {
+                $full = Join-Path $lib "common\$($matches[1])"
+                if (Test-Path $full) { return (Resolve-Path $full).Path }
+            }
+        }
+    }
+    return $null
+}
+
+function Test-GameRoot($p) {
+    return ($p -and (Test-Path (Join-Path $p 'dinodday\gameinfo.txt')))
+}
+
+function Resolve-GameRoot($explicit) {
+    if ($explicit) {
+        if (-not (Test-GameRoot $explicit)) {
+            throw "no dinodday\gameinfo.txt under '$explicit'"
+        }
+        return (Resolve-Path $explicit).Path
+    }
+    $r = Find-GameRoot
+    if (Test-GameRoot $r) { return $r }
+
+    Write-Warn2 "could not auto-detect the install."
+    while ($true) {
+        $in = (Read-Host "  Install root (blank to quit)").Trim('"',' ')
+        if ($in -eq '') { return $null }
+        if (Test-GameRoot $in) { return (Resolve-Path $in).Path }
+        Write-Bad "no dinodday\gameinfo.txt there -- try again"
+    }
+}
+
+# ------------------------------------------------------------------ spray fix
+
+function Get-SprayPaths($root) {
+    return @{
+        Target = Join-Path $root 'dinodday\downloads'
+        Link   = Join-Path $root 'update\downloads'
+        Temps  = @((Join-Path $root 'update\materials\temp'),
+                   (Join-Path $root 'dinodday\materials\temp'))
+    }
+}
+
+function Get-SprayStatus($root) {
+    $p = Get-SprayPaths $root
+    $i = Get-Item $p.Link -Force -ErrorAction SilentlyContinue
+    if (-not $i) { return 'not installed' }
+    if ($i.LinkType -ne 'Junction') { return 'not installed' }
+    if ($i.Target -contains $p.Target) { return 'installed' }
+    return 'wrong target'
+}
+
+function Install-SprayFix($root) {
+    if (Test-GameRunning) { return }
+    $p = Get-SprayPaths $root
+
+    if (-not (Test-Path $p.Target)) {
+        New-Item -ItemType Directory -Path $p.Target -Force | Out-Null
+        Write-Good "created $($p.Target)"
+    }
+
+    $existing = Get-Item $p.Link -Force -ErrorAction SilentlyContinue
+    if ($existing -and $existing.LinkType -eq 'Junction') {
+        if ($existing.Target -contains $p.Target) { Write-Good "already installed"; return }
+        Write-Warn2 "replacing junction pointing at $($existing.Target)"
+        [System.IO.Directory]::Delete($p.Link, $false)
+    } elseif ($existing) {
+        $files = Get-ChildItem $p.Link -File -ErrorAction SilentlyContinue
+        if ($files) {
+            Write-Warn2 "migrating $($files.Count) file(s) to the target folder"
+            foreach ($f in $files) {
+                $d = Join-Path $p.Target $f.Name
+                if (-not (Test-Path $d)) { Move-Item $f.FullName $d }
+            }
+        }
+        if (Get-ChildItem $p.Link -Force -ErrorAction SilentlyContinue) {
+            Write-Bad "$($p.Link) still has contents -- clear it by hand"; return
+        }
+        Remove-Item $p.Link -Force
+    }
+
+    $parent = Split-Path $p.Link -Parent
+    if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    New-Item -ItemType Junction -Path $p.Link -Target $p.Target | Out-Null
+    Write-Good "junction created: $($p.Link) -> $($p.Target)"
+}
+
+function Uninstall-SprayFix($root) {
+    if (Test-GameRunning) { return }
+    $p = Get-SprayPaths $root
+    $i = Get-Item $p.Link -Force -ErrorAction SilentlyContinue
+    if ($i -and $i.LinkType -eq 'Junction') {
+        # Delete($path, $false) removes the link only. Remove-Item -Recurse
+        # would follow it and take the target's contents.
+        [System.IO.Directory]::Delete($p.Link, $false)
+        New-Item -ItemType Directory -Path $p.Link -Force | Out-Null
+        Write-Good "junction removed"
+    } else {
+        Write-Warn2 "no junction to remove"
+    }
+}
+
+function Clear-SprayCache($root) {
+    if (Test-GameRunning) { return }
+    $p = Get-SprayPaths $root
+    foreach ($t in $p.Temps) {
+        if (Test-Path $t) {
+            Get-ChildItem $t -File | Remove-Item -Force
+            Write-Good "cleared $t"
+        }
+    }
+    if (Test-Path $p.Target) {
+        Get-ChildItem $p.Target -File -Filter *.dat | Remove-Item -Force
+        Write-Good "cleared downloaded .dat files"
+    }
+}
+
+# --------------------------------------------------------------- config tweaks
+
+function Get-ConfigPath($root) { Join-Path $root 'dinodday\cfg\autoexec.cfg' }
+
+function Get-ConfigStatus($root) {
+    $f = Get-ConfigPath $root
+    if (-not (Test-Path $f)) { return 'not installed' }
+    if ((Get-Content $f -Raw) -match [regex]::Escape($CFG_BEGIN)) { return 'installed' }
+    return 'not installed'
+}
+
+function Write-ConfigBlock($root, $tweaks) {
+    $f = Get-ConfigPath $root
+    $dir = Split-Path $f -Parent
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+    # Preserve anything the user put outside our markers.
+    $kept = @()
+    if (Test-Path $f) {
+        $inBlock = $false
+        foreach ($line in Get-Content $f) {
+            if ($line.Trim() -eq $CFG_BEGIN) { $inBlock = $true; continue }
+            if ($line.Trim() -eq $CFG_END)   { $inBlock = $false; continue }
+            if (-not $inBlock) { $kept += $line }
+        }
+        Copy-Item $f "$f.bak" -Force
+    }
+
+    $block = @($CFG_BEGIN, "// generated $(Get-Date -Format 'yyyy-MM-dd HH:mm')")
+    foreach ($t in $tweaks) {
+        if (-not $t.Enabled) { continue }
+        $line = if ($t.HasArg) { $t.Line -f $t.Arg } else { $t.Line }
+        $block += "// $($t.Desc)"
+        $block += $line
+    }
+    $block += $CFG_END
+
+    # Trim trailing blanks from kept content so the file stays tidy.
+    while ($kept.Count -gt 0 -and $kept[-1].Trim() -eq '') {
+        $kept = $kept[0..($kept.Count - 2)]
+    }
+
+    Set-Content -Path $f -Value (@($kept) + @('') + $block) -Encoding ASCII
+    Write-Good "wrote $f"
+    if (Test-Path "$f.bak") { Write-Step "previous version saved as autoexec.cfg.bak" }
+}
+
+function Remove-ConfigBlock($root) {
+    $f = Get-ConfigPath $root
+    if (-not (Test-Path $f)) { Write-Warn2 "no autoexec.cfg"; return }
+    $kept = @(); $inBlock = $false
+    foreach ($line in Get-Content $f) {
+        if ($line.Trim() -eq $CFG_BEGIN) { $inBlock = $true; continue }
+        if ($line.Trim() -eq $CFG_END)   { $inBlock = $false; continue }
+        if (-not $inBlock) { $kept += $line }
+    }
+    Set-Content -Path $f -Value $kept -Encoding ASCII
+    Write-Good "removed managed block (other lines kept)"
+}
+
+function Invoke-ConfigMenu($root) {
+    $tweaks = @()
+    foreach ($t in $TWEAKS) {
+        $c = $t.Clone()
+        $c.Enabled = $t.Default
+        $tweaks += $c
+    }
+
+    while ($true) {
+        Write-Host "`n  Config tweaks -- toggle by number, 'a' to apply, 'q' to go back`n"
+        for ($i = 0; $i -lt $tweaks.Count; $i++) {
+            $t = $tweaks[$i]
+            $mark = if ($t.Enabled) { 'x' } else { ' ' }
+            $extra = if ($t.HasArg) { " (key: $($t.Arg))" } else { '' }
+            Write-Host ("    [{0}] {1}. {2}{3}" -f $mark, ($i+1), $t.Desc, $extra)
+        }
+        Write-Host ''
+        $a = (Read-Host "  choice").Trim().ToLower()
+
+        if ($a -eq 'q') { return }
+        if ($a -eq 'a') { Write-ConfigBlock $root $tweaks; return }
+        if ($a -match '^\d+$') {
+            $idx = [int]$a - 1
+            if ($idx -ge 0 -and $idx -lt $tweaks.Count) {
+                $t = $tweaks[$idx]
+                $t.Enabled = -not $t.Enabled
+                if ($t.Enabled -and $t.HasArg) {
+                    $k = (Read-Host "  key to bind (blank keeps '$($t.Arg)')").Trim()
+                    if ($k -ne '') { $t.Arg = $k.ToLower() }
+                }
+            }
+        }
+    }
+}
+
+# ------------------------------------------------------------- tier0 dll patch
+
+function Get-Tier0Status($root) {
+    $f = Join-Path $root $T0_REL
+    if (-not (Test-Path $f)) { return 'missing' }
+    $b = [System.IO.File]::ReadAllBytes($f)
+    if ($b.Length -lt ($T0_OFFSET + $T0_PATCHED.Length)) { return 'unrecognised' }
+    $cur = $b[$T0_OFFSET..($T0_OFFSET + $T0_PATCHED.Length - 1)]
+    if (-not (Compare-Object $cur $T0_PATCHED))  { return 'applied' }
+    if (-not (Compare-Object $cur $T0_ORIGINAL)) { return 'not applied' }
+    return 'unrecognised'
+}
+
+function Install-Tier0Patch($root) {
+    if (Test-GameRunning) { return }
+    $f = Join-Path $root $T0_REL
+    if (-not (Test-Path $f)) { Write-Bad "$T0_REL not found"; return }
+
+    $threads = Get-LogicalProcessorCount
+    Write-Step "this CPU reports $threads logical processors"
+    if ($threads -le $T0_MIN_THREADS) {
+        Write-Warn2 "the bug only affects CPUs with more than $T0_MIN_THREADS threads."
+        Write-Warn2 "this patch will not help you and is not worth the risk."
+        if (-not (Read-YesNo "Apply anyway?" $false)) { return }
+    }
+
+    Write-Host ''
+    Write-Warn2 "This modifies a game DLL. Dino D-Day has VAC enabled, so"
+    Write-Warn2 "modifying game files carries a risk of a VAC ban. The community"
+    Write-Warn2 "runs this patch widely without reported problems, but the risk"
+    Write-Warn2 "is yours to take."
+    Write-Host ''
+    if (-not (Read-YesNo "Understood -- proceed?" $false)) { return }
+
+    $status = Get-Tier0Status $root
+    if ($status -eq 'applied') { Write-Good "already patched"; return }
+
+    $hash = (Get-FileHash $f -Algorithm SHA256).Hash
+    if ($hash -ne $T0_SHA256) {
+        Write-Warn2 "tier0.dll does not match the known original:"
+        Write-Warn2 "  expected $T0_SHA256"
+        Write-Warn2 "  found    $hash"
+        Write-Warn2 "The game may have been updated. Patching at a fixed offset"
+        Write-Warn2 "in a file you cannot verify can corrupt it."
+        if (-not (Read-YesNo "Proceed regardless?" $false)) { return }
+    }
+
+    if ($status -eq 'unrecognised') {
+        Write-Bad "bytes at 0x$('{0:X}' -f $T0_OFFSET) are neither original nor patched -- refusing"
+        return
+    }
+
+    $backup = Join-Path $root $T0_BACKUP
+    if (-not (Test-Path $backup)) {
+        Copy-Item $f $backup -Force
+        Write-Good "backed up to $T0_BACKUP"
+    }
+
+    $b = [System.IO.File]::ReadAllBytes($f)
+    for ($i = 0; $i -lt $T0_PATCHED.Length; $i++) { $b[$T0_OFFSET + $i] = $T0_PATCHED[$i] }
+    [System.IO.File]::WriteAllBytes($f, $b)
+
+    if ((Get-Tier0Status $root) -eq 'applied') {
+        Write-Good "patch applied and verified"
+    } else {
+        Write-Bad "verification failed -- restore from $T0_BACKUP"
+    }
+}
+
+function Uninstall-Tier0Patch($root) {
+    if (Test-GameRunning) { return }
+    $f = Join-Path $root $T0_REL
+    $backup = Join-Path $root $T0_BACKUP
+
+    if (Test-Path $backup) {
+        if ((Get-FileHash $backup -Algorithm SHA256).Hash -eq $T0_SHA256) {
+            Copy-Item $backup $f -Force
+            Write-Good "restored original from backup"
+            return
+        }
+        Write-Warn2 "backup does not match the known original hash; not using it"
+    }
+
+    if ((Get-Tier0Status $root) -ne 'applied') { Write-Warn2 "not patched"; return }
+    $b = [System.IO.File]::ReadAllBytes($f)
+    for ($i = 0; $i -lt $T0_ORIGINAL.Length; $i++) { $b[$T0_OFFSET + $i] = $T0_ORIGINAL[$i] }
+    [System.IO.File]::WriteAllBytes($f, $b)
+    Write-Good "bytes restored in place"
+    Write-Step "run Steam's 'Verify integrity of game files' to be certain"
+}
+
+# ------------------------------------------------------------------- main menu
+
+function Show-Status($root) {
+    $threads = Get-LogicalProcessorCount
+    Write-Host "`n  Install : $root"
+    Write-Host "  CPU     : $threads logical processors`n"
+    Write-Host "    1. Spray fix ............ [$(Get-SprayStatus $root)]"
+    Write-Host "    2. Config tweaks ........ [$(Get-ConfigStatus $root)]"
+    $t0 = Get-Tier0Status $root
+    $note = if ($threads -gt $T0_MIN_THREADS) { '  <- recommended for this CPU' } else { '  (not needed)' }
+    Write-Host "    3. Thread-count fix ..... [$t0]$note"
+}
+
+function Invoke-Menu($root) {
+    while ($true) {
+        Show-Status $root
+        Write-Host "`n    4. Clear spray caches"
+        Write-Host "    5. Change install path"
+        Write-Host "    0. Exit`n"
+        $a = (Read-Host "  choice").Trim()
+
+        switch ($a) {
+            '1' {
+                if ((Get-SprayStatus $root) -eq 'installed') {
+                    if (Read-YesNo "Spray fix is installed. Remove it?" $false) {
+                        Uninstall-SprayFix $root
+                    }
+                } else { Install-SprayFix $root }
+            }
+            '2' {
+                if ((Get-ConfigStatus $root) -eq 'installed') {
+                    if (Read-YesNo "Config block exists. Remove it? (no = edit)" $false) {
+                        Remove-ConfigBlock $root
+                    } else { Invoke-ConfigMenu $root }
+                } else { Invoke-ConfigMenu $root }
+            }
+            '3' {
+                if ((Get-Tier0Status $root) -eq 'applied') {
+                    if (Read-YesNo "Thread-count fix is applied. Revert it?" $false) {
+                        Uninstall-Tier0Patch $root
+                    }
+                } else { Install-Tier0Patch $root }
+            }
+            '4' { Clear-SprayCache $root }
+            '5' {
+                $n = Resolve-GameRoot $null
+                if ($n) { $root = $n }
+            }
+            '0' { return }
+        }
+    }
+}
+
+# ------------------------------------------------------------------------ run
+
+if ($Help) { Get-Help $PSCommandPath -Detailed; return }
+
+Write-Host "`n  DinoDDayPatcher`n"
+
+$root = Resolve-GameRoot $Path
+if (-not $root) { Write-Bad "no install selected"; return }
+
+if ($Status)     { Show-Status $root; Write-Host ''; return }
+if ($Revert)     { Uninstall-SprayFix $root; return }
+if ($ClearCache) { Clear-SprayCache $root; return }
+
+Invoke-Menu $root
+Write-Host ''
