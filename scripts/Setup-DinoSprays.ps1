@@ -32,13 +32,72 @@
 
 [CmdletBinding()]
 param(
+    [Parameter(Position = 0)]
+    [Alias('p', 'Path')]
     [string]$GamePath,
+
+    [Alias('a', 'App')]
     [int]$AppId = 70000,
+
+    [Alias('r')]
     [switch]$Revert,
-    [switch]$ClearCache
+
+    [Alias('c', 'Clear')]
+    [switch]$ClearCache,
+
+    [Alias('h', '?')]
+    [switch]$Help
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Show-Usage {
+    $name = Split-Path -Leaf $PSCommandPath
+    Write-Host @"
+
+$name -- spray download junction setup for Dino D-Day
+
+USAGE
+    .\$name [-p <path>] [-r] [-c] [-a <appid>] [-h]
+
+PARAMETERS
+    -p, -Path, -GamePath <path>
+        Install root -- the folder containing the 'dinodday' subfolder.
+        Omit to auto-detect from the Steam registry keys and library
+        manifests. Also accepted positionally: .\$name "D:\Games\Dino D-Day"
+
+    -r, -Revert
+        Remove the junction and restore a plain empty directory.
+
+    -c, -Clear, -ClearCache
+        Wipe both materials\temp folders and any downloaded .dat files.
+        Use before re-testing: those caches persist forever and will
+        otherwise serve you stale results.
+
+    -a, -App, -AppId <number>
+        Steam app id for detection. Default 70000.
+
+    -h, -Help
+        This text.
+
+EXAMPLES
+    .\$name
+        Auto-detect and set up the junction.
+
+    .\$name -p "D:\Games\Dino D-Day" -c
+        Use an explicit path and clear the caches too.
+
+    .\$name -r
+        Undo.
+
+NOTES
+    Junctions do not need administrator rights.
+    Close the game first -- search paths are cached at startup.
+
+"@
+}
+
+if ($Help) { Show-Usage; return }
 
 function Write-Step($msg)  { Write-Host "  $msg" }
 function Write-Good($msg)  { Write-Host "  $msg" -ForegroundColor Green }
@@ -143,10 +202,10 @@ if ($GamePath) {
     Write-Step "locating install..."
     $root = Get-GamePathFromSteam $AppId
     if (-not $root) {
-        throw "could not locate the game. Re-run with -GamePath '<install root>'."
+        throw "could not locate the game. Re-run with -p '<install root>' (see -h)."
     }
     if (-not (Test-GameRoot $root)) {
-        throw "found '$root' but it has no dinodday\gameinfo.txt. Re-run with -GamePath."
+        throw "found '$root' but it has no dinodday\gameinfo.txt. Re-run with -p (see -h)."
     }
 }
 Write-Good "install root: $root"
