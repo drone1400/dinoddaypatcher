@@ -6,8 +6,8 @@
     Run with no arguments for an interactive menu.
 
     Patches:
-      1. Spray fix       -- junction so server-delivered sprays render
-      2. Config tweaks   -- managed block in cfg\autoexec.cfg
+      1. Config tweaks   -- managed block in cfg\autoexec.cfg
+      2. Spray fix       -- junction so server-delivered sprays render
       3. Thread-count fix -- patches bin\tier0.dll for CPUs with >28 threads
 
 .PARAMETER Path
@@ -57,18 +57,51 @@ $T0_PATCHED  = [byte[]](0x36,0xC6,0x40,0x05,0x18,0x36,0xC6,0x40,0x06,0x18,0xC3,0
 $T0_ORIGINAL = [byte[]](0xC3,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC)
 $T0_MIN_THREADS = 28
 
+# Ambient light presets. The index is also the F-key number used by the binds,
+# so this table is the single source of truth for both the picker and the keys
+# it hands out.
+$AMBIENT_PRESETS = @(
+    @{ Value = '0';    Label = 'off (game default)' },
+    @{ Value = '0.01'; Label = 'light' },
+    @{ Value = '0.03'; Label = 'medium' },
+    @{ Value = '0.1';  Label = 'bright' },
+    @{ Value = '0.2';  Label = 'really bright' }
+)
+# One key past the presets, for a custom level. Function keys are unbound in
+# Dino D-Day by default, so F1-F6 are safe to take.
+$AMBIENT_CUSTOM_KEY = 'F' + ($AMBIENT_PRESETS.Count + 1)
+
+# All three channels have to be set together and to the same number. Setting
+# them independently tints the scene instead of brightening it.
+function New-AmbientCommand($value) {
+    return ('mat_ambient_light_r {0};mat_ambient_light_g {0};mat_ambient_light_b {0}' -f $value)
+}
+
+# A legend line followed by one bind per preset. Passing '{0}' through
+# New-AmbientCommand yields a line Write-ConfigBlock can fill in later.
+function New-AmbientBindLines {
+    $legend = @()
+    $binds  = @()
+    for ($i = 0; $i -lt $AMBIENT_PRESETS.Count; $i++) {
+        $p = $AMBIENT_PRESETS[$i]
+        $legend += ('F{0}={1}' -f ($i + 1), $p.Label)
+        $binds  += ('bind F{0} "{1}"' -f ($i + 1), (New-AmbientCommand $p.Value))
+    }
+    return @('// ' + ($legend -join '  ')) + $binds
+}
+
 # Config tweaks. Built fresh by New-TweakList so each call gets its own
 # hashtables -- no cloning, no shared state between menu visits.
-# ArgType: 'none', 'key' (a bind key), or 'logofile' (a path under dinodday\).
-# {0} in a line is replaced with Arg.
+# ArgType: 'none', 'key' (a bind key), 'logofile' (a path under dinodday\),
+# 'fps', 'ambient' (a light level), or 'ambientbinds' (level mirrored from the
+# ambient option rather than prompted for).
+# {0} in a line is replaced with Arg. OptionalLines are emitted only when Arg
+# holds something.
 function New-TweakList {
     $list = @()
     $list += @{ Enabled = $true;  ArgType = 'none'; Arg = '';
                 Desc = 'Skip warmup rounds on private maps';
                 Lines = @('ddd_player_waittime "0"') }
-    $list += @{ Enabled = $false; ArgType = 'none'; Arg = '';
-                Desc = 'Brightness fix (some Intel systems render too dark)';
-                Lines = @('mat_tonemapping_occlusion_use_stencil "1"') }
     $list += @{ Enabled = $true;  ArgType = 'none'; Arg = '';
                 Desc = 'Allow downloading maps and sprays';
                 Lines = @('cl_downloadfilter "all"', 'cl_allowdownload "1"') }
@@ -81,6 +114,22 @@ function New-TweakList {
     $list += @{ Enabled = $false; ArgType = 'logofile'; Arg = '';
                 Desc = 'Use a custom spray file';
                 Lines = @('cl_logofile "{0}"') }
+    $list += @{ Enabled = $true;  ArgType = 'fps'; Arg = '120';
+                Desc = 'Frame rate cap';
+                Lines = @('fps_max "{0}"') }
+    $list += @{ Enabled = $false; ArgType = 'ambient'; Arg = '0.01';
+                Desc = 'Ambient light level (brightens dark areas)';
+                Lines = @('mat_ambient_light_r "{0}"',
+                          'mat_ambient_light_g "{0}"',
+                          'mat_ambient_light_b "{0}"') }
+    $list += @{ Enabled = $false; ArgType = 'ambientbinds'; Arg = '';
+                Desc = "Bind F1-F$($AMBIENT_PRESETS.Count) to ambient light levels";
+                Lines = (New-AmbientBindLines);
+                OptionalLines = @("// $AMBIENT_CUSTOM_KEY = your custom level",
+                                  "bind $AMBIENT_CUSTOM_KEY `"$(New-AmbientCommand '{0}')`"") }
+    $list += @{ Enabled = $false; ArgType = 'none'; Arg = '';
+                Desc = 'Brightness fix (for Intel HD Graphics, mainly 500/600 series)';
+                Lines = @('mat_tonemapping_occlusion_use_stencil "1"') }
     return $list
 }
 
@@ -123,6 +172,77 @@ function Read-LogoFile($root) {
         Write-Good "using $rel"
         return $rel
     }
+}
+
+# fps_max. 0 means uncapped; the engine ignores anything under 30.
+function Read-FpsMax($current) {
+    Write-Step "Frame rate cap. 0 is uncapped; the engine ignores values under 30."
+    while ($true) {
+        $in = (Read-Host "  fps (blank keeps $current)").Trim()
+        if ($in -eq '') { return $current }
+        if ($in -notmatch '^\d+$') { Write-Bad "whole numbers only"; continue }
+        $n = [int]$in
+        if ($n -ne 0 -and ($n -lt 30 -or $n -gt 1000)) {
+            Write-Bad "use 0 for uncapped, or a number between 30 and 1000"
+            continue
+        }
+        return "$n"
+    }
+}
+
+# The regex forbids a comma, so a non-English locale cannot get '0,05' this
+# far, and parsing is pinned to the invariant culture for the same reason.
+# Normalising means '0.010' collapses to '0.01' and is recognised as a preset
+# instead of pointlessly occupying the custom key.
+function Read-AmbientCustom {
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    while ($true) {
+        $in = (Read-Host "  custom level, 0 to 1 (blank to go back)").Trim()
+        if ($in -eq '') { return $null }
+        if ($in -notmatch '^\d+(\.\d+)?$') {
+            Write-Bad "a number like 0.05 -- use a dot, not a comma"
+            continue
+        }
+        $v = [double]::Parse($in, $inv)
+        if ($v -lt 0 -or $v -gt 1) { Write-Bad "0 to 1 only"; continue }
+        if ($v -gt 0.2) { Write-Warn2 "above 0.2 the picture washes out badly" }
+        return $v.ToString('0.####', $inv)
+    }
+}
+
+function Read-AmbientLevel($current) {
+    $customChoice = $AMBIENT_PRESETS.Count + 1
+    Write-Host ''
+    Write-Step "Ambient light level -- lifts the darkest parts of a map."
+    for ($i = 0; $i -lt $AMBIENT_PRESETS.Count; $i++) {
+        $p = $AMBIENT_PRESETS[$i]
+        Write-Host ("    " + ($i + 1) + ". " + $p.Value.PadRight(6) + $p.Label)
+    }
+    Write-Host ("    $customChoice. custom value")
+
+    while ($true) {
+        $in = (Read-Host "  level (blank keeps $current)").Trim()
+        if ($in -eq '') { return $current }
+        if ($in -notmatch '^\d+$') { Write-Bad "pick a number from the list"; continue }
+        $n = [int]$in
+        if ($n -ge 1 -and $n -le $AMBIENT_PRESETS.Count) { return $AMBIENT_PRESETS[$n - 1].Value }
+        if ($n -ne $customChoice) { Write-Warn2 "no such option"; continue }
+        $v = Read-AmbientCustom
+        if ($v) { return $v }
+    }
+}
+
+# The custom key mirrors a custom level picked in the ambient light option.
+# Preset levels already have keys of their own, so it is only added for a value
+# that is not one of them. Runs after every change and before writing.
+function Sync-AmbientBinds($tweaks) {
+    $binds = @($tweaks | Where-Object { $_.ArgType -eq 'ambientbinds' })
+    if ($binds.Count -eq 0) { return }
+    $amb = @($tweaks | Where-Object { $_.ArgType -eq 'ambient' })
+    $level = ''
+    if ($amb.Count -gt 0) { $level = $amb[0].Arg }
+    if ($level -and ($AMBIENT_PRESETS.Value -notcontains $level)) { $binds[0].Arg = $level }
+    else { $binds[0].Arg = '' }
 }
 
 # ------------------------------------------------------------------ utilities
@@ -406,6 +526,74 @@ function Get-ConfigStatus($root) {
     return 'not installed'
 }
 
+# Matches an option's first real (non-comment) line, with {0} turned into a
+# capture group so the value comes back with the on/off state. Splitting on the
+# placeholder and escaping the pieces avoids depending on how Regex.Escape
+# happens to treat braces.
+function Get-TweakPattern($t) {
+    $sig = @($t.Lines | Where-Object { $_ -notmatch '^\s*//' })[0]
+    if (-not $sig) { return $null }
+    $parts = @($sig -split '\{0\}' | ForEach-Object { [regex]::Escape($_) })
+    return '^\s*' + ($parts -join '(.+?)') + '\s*$'
+}
+
+# A block that has been edited by hand can hold anything. Values that do not fit
+# the option are dropped so nonsense cannot travel back into the file or into a
+# bind; the option still comes back on, at its default value.
+function Test-TweakArg($t, $v) {
+    if ($v -eq '') { return $false }
+    switch ($t.ArgType) {
+        'key'      { return ($v -notmatch '[\s"]') }
+        'logofile' { return $true }
+        'fps'      { return ($v -match '^\d+$') }
+        'ambient'  { return ($v -match '^\d+(\.\d+)?$') }
+    }
+    return $false
+}
+
+# Reads an existing managed block back into the toggle list, so the menu opens
+# on what is actually in the file instead of the defaults. The block is the
+# record of what was applied, so an option the block does not mention is one
+# that was switched off.
+#
+# Only the first line of a multi-line option is inspected. The three ambient
+# channels are always written together, so reading the red one back is enough --
+# hand-edited channels that disagree get unified on the next apply.
+function Read-ConfigBlock($root, $tweaks) {
+    $f = Get-ConfigPath $root
+    if (-not (Test-Path $f)) { return }
+
+    $body = @(); $inBlock = $false; $seen = $false
+    foreach ($line in Get-Content $f) {
+        if ($line.Trim() -eq $CFG_BEGIN) { $inBlock = $true; $seen = $true; continue }
+        if ($line.Trim() -eq $CFG_END)   { $inBlock = $false; continue }
+        if ($inBlock) { $body += $line }
+    }
+    if (-not $seen) { return }
+
+    foreach ($t in $tweaks) { $t.Enabled = $false }
+
+    $rejected = @()
+    foreach ($t in $tweaks) {
+        $rx = Get-TweakPattern $t
+        if (-not $rx) { continue }
+        foreach ($line in $body) {
+            $m = [regex]::Match($line, $rx)
+            if (-not $m.Success) { continue }
+            $t.Enabled = $true
+            if ($m.Groups.Count -gt 1) {
+                $v = $m.Groups[1].Value.Trim()
+                if (Test-TweakArg $t $v) { $t.Arg = $v }
+                else { $rejected += "$($t.Desc) -- '$v'" }
+            }
+            break
+        }
+    }
+
+    Write-Good "loaded your current settings from autoexec.cfg"
+    foreach ($r in $rejected) { Write-Warn2 "unusable value ignored: $r" }
+}
+
 function Write-ConfigBlock($root, $tweaks) {
     $f = Get-ConfigPath $root
     $dir = Split-Path $f -Parent
@@ -427,8 +615,12 @@ function Write-ConfigBlock($root, $tweaks) {
     foreach ($t in $tweaks) {
         if (-not $t.Enabled) { continue }
         $block += "// $($t.Desc)"
-        foreach ($l in $t.Lines) {
-            if ($t.ArgType -ne 'none') { $block += ($l -f $t.Arg) }
+        $lines = @($t.Lines)
+        # Optional lines only make sense once Arg holds something -- see the
+        # ambient binds, where they are the custom-level key.
+        if ($t.OptionalLines -and $t.Arg) { $lines += $t.OptionalLines }
+        foreach ($l in $lines) {
+            if ($l -like '*{0}*') { $block += ($l -f $t.Arg) }
             else { $block += $l }
         }
     }
@@ -447,6 +639,7 @@ function Write-ConfigBlock($root, $tweaks) {
 function Remove-ConfigBlock($root) {
     $f = Get-ConfigPath $root
     if (-not (Test-Path $f)) { Write-Warn2 "no autoexec.cfg"; return }
+    Copy-Item $f "$f.bak" -Force
     $kept = @(); $inBlock = $false
     foreach ($line in Get-Content $f) {
         if ($line.Trim() -eq $CFG_BEGIN) { $inBlock = $true; continue }
@@ -455,10 +648,70 @@ function Remove-ConfigBlock($root) {
     }
     Set-Content -Path $f -Value $kept -Encoding ASCII
     Write-Good "removed managed block (other lines kept)"
+    Write-Step "previous version saved as autoexec.cfg.bak"
+}
+
+# The parenthesised part after an option in the menu.
+function Get-TweakArgLabel($t) {
+    switch ($t.ArgType) {
+        'key'      { return "key: $($t.Arg)" }
+        'logofile' {
+            if ($t.Arg) { return $t.Arg }
+            return 'none picked'
+        }
+        'fps' {
+            if ($t.Arg -eq '0') { return 'uncapped' }
+            return $t.Arg
+        }
+        'ambient' {
+            $p = @($AMBIENT_PRESETS | Where-Object { $_.Value -eq $t.Arg })
+            if ($p.Count -gt 0) { return "$($t.Arg) - $($p[0].Label)" }
+            return "$($t.Arg) - custom"
+        }
+        'ambientbinds' {
+            if ($t.Arg) { return "+$($AMBIENT_CUSTOM_KEY): $($t.Arg)" }
+            return ''
+        }
+    }
+    return ''
+}
+
+# Prompts for an option's value. Returns $null only when the user cancelled,
+# in which case the caller leaves the option as it found it.
+function Read-TweakArg($root, $t) {
+    switch ($t.ArgType) {
+        'key' {
+            $k = (Read-Host "  key to bind (blank keeps '$($t.Arg)')").Trim()
+            if ($k -eq '') { return $t.Arg }
+            return $k.ToLower()
+        }
+        'logofile' { return (Read-LogoFile $root) }
+        'fps'      { return (Read-FpsMax $t.Arg) }
+        'ambient'  { return (Read-AmbientLevel $t.Arg) }
+    }
+    return $null
+}
+
+# An option that carries a value needs a way to change it without toggling it
+# off and on again, which would throw the current value away.
+function Read-TweakAction($t) {
+    Write-Host ''
+    Write-Step "$($t.Desc) is on ($(Get-TweakArgLabel $t))."
+    Write-Host "    1. change value"
+    Write-Host "    2. turn it off"
+    Write-Host "    3. cancel"
+    while ($true) {
+        $a = (Read-Host "  choice").Trim()
+        if ($a -eq '1') { return 'edit' }
+        if ($a -eq '2') { return 'off' }
+        if ($a -eq '3' -or $a -eq '') { return 'cancel' }
+    }
 }
 
 function Invoke-ConfigMenu($root) {
     $tweaks = @(New-TweakList)
+    Read-ConfigBlock $root $tweaks
+    Sync-AmbientBinds $tweaks
 
     if ($tweaks.Count -eq 0) {
         Write-Bad "tweak list came back empty -- New-TweakList is not returning anything"
@@ -466,22 +719,23 @@ function Invoke-ConfigMenu($root) {
     }
 
     while ($true) {
+        $installed = (Get-ConfigStatus $root) -eq 'installed'
+
         Write-Host ''
         Write-Header "Config tweaks for autoexec.cfg"
-        Write-Header "toggle by number, 'a' to apply, 'q' to go back"
+        if ($installed) {
+            Write-Header "toggle by number, 'a' to apply, 'u' to uninstall, 'q' to go back"
+        } else {
+            Write-Header "toggle by number, 'a' to apply, 'q' to go back"
+        }
         Write-Host ''
 
         for ($i = 0; $i -lt $tweaks.Count; $i++) {
             $mark = ' '
             if ($tweaks[$i].Enabled) { $mark = 'x' }
             $label = $tweaks[$i].Desc
-            if ($tweaks[$i].ArgType -eq 'key') {
-                $label = "$label (key: $($tweaks[$i].Arg))"
-            } elseif ($tweaks[$i].ArgType -eq 'logofile') {
-                $shown = $tweaks[$i].Arg
-                if (-not $shown) { $shown = 'none picked' }
-                $label = "$label ($shown)"
-            }
+            $arg = Get-TweakArgLabel $tweaks[$i]
+            if ($arg) { $label = "$label ($arg)" }
             Write-Host ("    [$mark] " + ($i + 1) + ". " + $label)
         }
 
@@ -490,14 +744,25 @@ function Invoke-ConfigMenu($root) {
 
         if ($a -eq 'q') { return }
 
+        if ($a -eq 'u') {
+            if (-not $installed) { Write-Warn2 "no managed block to remove"; continue }
+            if (Read-YesNo "Remove the managed block from autoexec.cfg?" $false) {
+                Remove-ConfigBlock $root
+                return
+            }
+            continue
+        }
+
         if ($a -eq 'a') {
             $missing = @($tweaks | Where-Object {
-                $_.Enabled -and $_.ArgType -eq 'logofile' -and -not $_.Arg
+                $_.Enabled -and ($_.ArgType -notin @('none', 'ambientbinds')) -and -not $_.Arg
             })
             if ($missing.Count -gt 0) {
-                Write-Bad "no spray file picked -- choose one or turn that option off"
+                Write-Bad "no value set for: $(($missing | ForEach-Object { $_.Desc }) -join ', ')"
+                Write-Step "set one, or turn that option off"
                 continue
             }
+            Sync-AmbientBinds $tweaks
             Write-ConfigBlock $root $tweaks
             return
         }
@@ -505,18 +770,24 @@ function Invoke-ConfigMenu($root) {
         if ($a -match '^\d+$') {
             $idx = [int]$a - 1
             if ($idx -ge 0 -and $idx -lt $tweaks.Count) {
-                $tweaks[$idx].Enabled = -not $tweaks[$idx].Enabled
-
-                if ($tweaks[$idx].Enabled -and $tweaks[$idx].ArgType -eq 'key') {
-                    $k = (Read-Host "  key to bind (blank keeps '$($tweaks[$idx].Arg)')").Trim()
-                    if ($k -ne '') { $tweaks[$idx].Arg = $k.ToLower() }
+                $t = $tweaks[$idx]
+                if ($t.ArgType -in @('none', 'ambientbinds')) {
+                    $t.Enabled = -not $t.Enabled
+                } elseif ($t.Enabled) {
+                    switch (Read-TweakAction $t) {
+                        'edit' {
+                            $v = Read-TweakArg $root $t
+                            if ($null -ne $v) { $t.Arg = $v }
+                        }
+                        'off' { $t.Enabled = $false }
+                    }
+                } else {
+                    # A cancelled prompt leaves the option off, which is how
+                    # picking no spray file has always behaved.
+                    $v = Read-TweakArg $root $t
+                    if ($null -ne $v) { $t.Arg = $v; $t.Enabled = $true }
                 }
-
-                if ($tweaks[$idx].Enabled -and $tweaks[$idx].ArgType -eq 'logofile') {
-                    $f = Read-LogoFile $root
-                    if ($f) { $tweaks[$idx].Arg = $f }
-                    else { $tweaks[$idx].Enabled = $false }
-                }
+                Sync-AmbientBinds $tweaks
             } else {
                 Write-Warn2 "no such option"
             }
@@ -649,10 +920,10 @@ function Show-Status($root) {
     Write-Header "Install : $root"
     Write-Header "CPU     : $threads logical processors"
     Write-Host ''
-    Write-Host "    1. Spray fix ............ [$(Get-SprayStatus $root)]"
-    Write-Host "       [Lets server-delivered custom sprays download and render]" -ForegroundColor DarkGray
-    Write-Host "    2. Config tweaks ........ [$(Get-ConfigStatus $root)]"
+    Write-Host "    1. Config tweaks ........ [$(Get-ConfigStatus $root)]"
     Write-Host "       [Optional fixes and binds written to cfg\autoexec.cfg]" -ForegroundColor DarkGray
+    Write-Host "    2. Spray fix ............ [$(Get-SprayStatus $root)]"
+    Write-Host "       [Lets server-delivered custom sprays download and render]" -ForegroundColor DarkGray
     $t0 = Get-Tier0Status $root
     $note = if ($threads -gt $T0_MIN_THREADS) { '  <- recommended for this CPU' } else { '  (not needed)' }
     Write-Host "    3. Thread-count fix ..... [$t0]$note"
@@ -669,19 +940,13 @@ function Invoke-Menu($root) {
 
         try {
             switch ($a) {
-                '1' {
+                '1' { Invoke-ConfigMenu $root }
+                '2' {
                     if ((Get-SprayStatus $root) -eq 'installed') {
                         if (Read-YesNo "Spray fix is installed. Remove it?" $false) {
                             Uninstall-SprayFix $root
                         }
                     } else { Install-SprayFix $root }
-                }
-                '2' {
-                    if ((Get-ConfigStatus $root) -eq 'installed') {
-                        if (Read-YesNo "Config block exists. Remove it? (no = edit)" $false) {
-                            Remove-ConfigBlock $root
-                        } else { Invoke-ConfigMenu $root }
-                    } else { Invoke-ConfigMenu $root }
                 }
                 '3' {
                     if ((Get-Tier0Status $root) -eq 'applied') {

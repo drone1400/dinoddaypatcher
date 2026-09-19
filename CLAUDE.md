@@ -193,6 +193,7 @@ submitted container survives.
 | `spray_encode.py` | Image → clean, checksum-tuned VTF. Optional `--pack` writes the server `.dat`. The main pipeline tool. |
 | `spraycheck.py` | Independent structural validator for VTFs, and `.dat` name generator. Re-derives expected size from the header rather than trusting the encoder — keep it independent so it can catch encoder bugs. |
 | `DinoDDayPatcher.ps1` | Interactive Windows patcher: spray junction, `autoexec.cfg` tweaks, tier0 thread-count fix. |
+| `DinoDDayPatcher.bat` | Double-click launcher for the above. Bypasses the execution policy for that one process so users never reach for `Set-ExecutionPolicy`. |
 
 `vtf_encode.py` and `crc_tune.py` were merged into `spray_encode.py` and
 should not reappear.
@@ -215,6 +216,19 @@ should not reappear.
     script requires explicit confirmation and this must not be softened.
   - It refuses outright if the bytes at the offset are not the expected
     original, backs up first, and verifies after writing.
+- Config tweaks are a list of hashtables from `New-TweakList`. `{0}` in a line
+  is filled from that entry's `Arg`; `OptionalLines` are appended only when
+  `Arg` is non-empty. `$AMBIENT_PRESETS` drives the level picker, the bind
+  lines and the menu label, so levels get added there and nowhere else.
+- Opening the tweak menu reads an existing managed block back into the toggles
+  (`Read-ConfigBlock`), matching each option by a regex built from its first
+  non-comment line. An option the block does not mention is treated as having
+  been switched off, so the defaults in `New-TweakList` apply only when there is
+  no block at all.
+- Function keys are unbound in Dino D-Day by default, which is why the ambient
+  light binds can claim `F1`-`F6` without asking.
+- `mat_ambient_light_r/g/b` must always be written together and to the same
+  value. Setting them independently tints the scene instead of brightening it.
 - `Get-CimInstance Win32_Processor` is cached per session (slow). The tier0
   status check reads 13 bytes via FileStream rather than loading the whole
   DLL — do not revert that to `ReadAllBytes`.
@@ -233,8 +247,15 @@ should not reappear.
 - Related: the encoder sets flags `CLAMPS|CLAMPT|NOLOD|EIGHTBITALPHA`
   (`0x220C`) while `averi.vtf` has only `0x2000`. If rendering fails, try
   matching the stock flags.
-- **`DinoDDayPatcher.ps1` has never been executed.** It was written without
-  access to a Windows machine. Treat it as a draft.
+- **`DinoDDayPatcher.ps1` is only partly exercised.** `-h` and `-s` run
+  against a real install, and the config-tweak menu has been driven end to end
+  (menu, value prompts, block writing, backup) against a scratch game root.
+  The junction, cache-clearing and tier0 write paths have not been tested --
+  treat those as a draft.
+- **Whether `mat_ambient_light_r/g/b` are accepted on a live server.** Not
+  checked against this build with `sv_cheats 0`. If the `F1`-`F5` binds do
+  nothing online, they are cheat-flagged and the README should say the option
+  is single-player only.
 - Whether the junction works on first run with the game closed (during the
   session it required a game restart, attributed to cached search paths, but
   not isolated).

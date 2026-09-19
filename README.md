@@ -31,16 +31,25 @@ your install through Steam automatically.
 .\DinoDDayPatcher.ps1 -h       # help
 ```
 
+If you'd rather not use a terminal, double-click **`DinoDDayPatcher.bat`**
+instead. It launches the script with the execution policy bypassed for that
+one process — nothing on your machine is changed. You do **not** need to run
+`Set-ExecutionPolicy`.
+
 Three patches:
 
+- **Config tweaks** — writes a managed block to `dinodday\cfg\autoexec.cfg`:
+  skip warmup rounds, download settings, show other players' sprays, a spray
+  keybind, picking your own `cl_logofile`, a frame rate cap, an ambient light
+  level that lifts the darkest parts of a map — optionally with the five
+  preset levels bound to `F1`–`F5` so you can change it mid-match — and a
+  brightness fix for Intel HD Graphics (mainly the 500 and 600 series), which
+  render the game too dark. Each is individually toggleable, re-opening the
+  menu loads your current settings back out of the block rather than starting
+  from the defaults, and anything already in your `autoexec.cfg` outside the
+  managed block is preserved.
 - **Spray fix** — creates the directory junction that lets server-delivered
   sprays download and render.
-- **Config tweaks** — writes a managed block to `dinodday\cfg\autoexec.cfg`:
-  skip warmup rounds, brightness fix for dark rendering on some Intel
-  systems, download settings, show other players' sprays, a spray keybind,
-  and picking your own `cl_logofile`. Each is individually toggleable, and
-  anything already in your `autoexec.cfg` outside the managed block is
-  preserved.
 - **Thread-count fix** — patches `bin\tier0.dll` to fix a crash on map load
   for CPUs with more than 28 threads.
 
