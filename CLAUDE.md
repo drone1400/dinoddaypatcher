@@ -194,6 +194,7 @@ submitted container survives.
 | `spraycheck.py` | Independent structural validator for VTFs, and `.dat` name generator. Re-derives expected size from the header rather than trusting the encoder — keep it independent so it can catch encoder bugs. |
 | `DinoDDayPatcher.ps1` | Interactive Windows patcher: spray junction, `autoexec.cfg` tweaks, tier0 thread-count fix. |
 | `DinoDDayPatcher.bat` | Double-click launcher for the above. Bypasses the execution policy for that one process so users never reach for `Set-ExecutionPolicy`. |
+| `other-tools/bsp_audit.py` | Audits Source `.bsp` maps for referenced-but-unpacked assets. Its point is the cross-map case: a path one map is missing while another map in the same run packs it, which is the suspected rotation crash. Stdlib only. Read-only except for `--extract-fixes`. Unrelated to sprays. |
 
 `vtf_encode.py` and `crc_tune.py` were merged into `spray_encode.py` and
 should not reappear.

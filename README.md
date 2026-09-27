@@ -1,4 +1,4 @@
-# Dino D-Day spray tools
+# Dino D-Day tools
 
 > ⚠️ **Work in progress — not yet fully tested.**
 >
@@ -9,8 +9,9 @@
 > DLL. This notice will be removed once everything has been properly
 > re-tested.
 
-Tooling for custom player sprays on [DinoTown](http://dinotown.net), plus a
-patcher that applies community fixes to a Dino D-Day install.
+Tooling for custom player sprays on [DinoTown](http://dinotown.net), a patcher
+that applies community fixes to a Dino D-Day install, and a map asset auditor
+for server operators.
 
 Dino D-Day supports Team Fortress–style sprays via `impulse 201`, but they
 appear broken out of the box: the default `cl_logofile` points at a texture
@@ -149,3 +150,114 @@ downloads folder by hand works just as well.
 
 `sv_downloadurl` (fastdl) serves maps but not sprays; custom files always
 travel in-band. Configure it anyway — in-band map transfers are very slow.
+
+## Other tools
+
+Nothing to do with sprays; these live in `scripts/other-tools/`.
+
+### `bsp_audit.py`
+
+Finds assets a map references but doesn't pack — and, more usefully, which of
+those are packed in *another* map of the same rotation.
+
+That second case is the one worth hunting. When a map unloads, the content it
+packed goes with it, but a stale entry can survive in the engine. If a later
+map references that same path and doesn't pack it either, it hits the
+dangling entry and can crash. A player who joined after the earlier map had
+already rotated through never had the entry at all, and just gets an error
+texture instead. Same map, same rotation, two different symptoms depending on
+when you joined — which is why it shows up as a map that's "sometimes
+broken".
+
+That mechanism is the working explanation for crashes seen on certain
+rotations, not something that's been pinned down in a debugger. What is
+certain is the input to it: a map referencing a path it doesn't pack while
+another map in the rotation does. That's what this finds.
+
+So **audit the whole rotation in one run.** The cross-map check only compares
+the maps passed to a single invocation — audit a map on its own and it will
+look clean.
+
+```bash
+python bsp_audit.py --game "D:\SteamLibrary\steamapps\common\Dino D-Day\dinodday" "D:\ddd-server\dinodday\maps"
+python bsp_audit.py --custom selez maps\ddd_*_selez_*.bsp
+```
+
+Python 3.8+, standard library only — no dependencies. It reads maps and never
+writes to them. The only thing it creates is the folder you ask for with
+`--extract-fixes`.
+
+Point `--game` at a clean client install rather than the server's own
+`dinodday`, because the question being asked is what a *player* will be
+missing. Folders named `download`, `downloads` and `custom` are left out of
+the search paths deliberately — that's where stale copies of other servers'
+content pile up, and mounting them hides the exact problem you're looking
+for. Without `--game`, it looks for `gameinfo.txt` in the folders above the
+first map; with no game content at all it can only report what it's certain
+about.
+
+#### What it reports
+
+| Column | Meaning |
+|---|---|
+| `other-map` | Not packed here, but packed in another map of this run. The rotation crash. |
+| `missing` | Not found anywhere. An error texture or model for everyone. |
+| `loose-only` | Only present as loose files in a `--custom` folder on this machine. Players won't have them. |
+
+Dino D-Day ships much of its content loose rather than in VPKs, so loose files
+in the game folder count as stock by default. `--custom selez` declares that
+`materials/selez/`, `models/selez/` and friends are *not* stock, so anything
+found only there is reported instead of trusted. Use it for content a mapper
+installed locally and might not have shipped.
+
+There's also a cross-map conflict list: the same path packed with *different*
+contents in several maps, where which version a player sees depends on which
+map they loaded first. Expect this to be noisy if the folder holds several
+versions of one map — v3, v4 and v5 are entitled to disagree about their own
+materials. Audit what's actually in the rotation.
+
+For every problem file the report says where the map uses it: world faces,
+brush entities, overlays and static props with clustered coordinates, and
+entities with their targetname, origin and hammerid. Coordinates are world
+units, the same as in Hammer — `sv_cheats 1`, `noclip`, `setpos X Y Z` on a
+local server to go and look. In Hammer, the texture browser's **Mark** button
+selects every face using a material, and `hammerid` is the entity's id in the
+VMF.
+
+#### Options
+
+- `--game DIR` — game folder containing `gameinfo.txt`.
+- `--extra PATH` — extra stock content: a folder or a `_dir.vpk`. Repeatable.
+- `--custom NAME` — a custom content folder name, as above. Repeatable.
+- `--no-auto-game` — don't go looking for `gameinfo.txt` above the maps.
+- `--extract-fixes DIR` — see below.
+- `--brief` — skip the per-map detail; print the conflicts, the summary and
+  the list of files to fix.
+- `-v` — also list references it couldn't verify, and packed files that
+  override stock content.
+
+Exit status is `0` when clean, `1` when it found something and `2` when it
+couldn't read any of the maps, so it drops into a pre-deploy check as-is.
+
+#### Fixing what it finds
+
+`--extract-fixes DIR` pulls every `other-map` and `loose-only` file out of
+whichever map or folder does have it, writes them under `DIR/<map>/`, and
+generates a `bspzip` addlist per map along with the command to run:
+
+```
+bspzip -addlist ddd_hilltop_selez_v6.bsp ddd_hilltop_selez_v6_addlist.txt ddd_hilltop_selez_v6_fixed.bsp
+```
+
+Paths inside the addlist are absolute, so it works from wherever you run it.
+Anything under `missing` exists nowhere in the run, so it has to be tracked
+down or remade by hand. **Ship the repacked map under a new name** — clients
+cache maps by name, and anyone who already has the old one will carry on
+using it.
+
+#### Blind spots
+
+It doesn't chase soundscript or soundscape names, particle systems (`.pcf`
+files and particle manifests), materials referenced only from game code or
+scripts, or model skins set from code. A clean report means nothing it can
+see is missing, not that the map is complete.
