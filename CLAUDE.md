@@ -188,16 +188,25 @@ submitted container survives.
 
 ## Repo contents
 
+Scripts are grouped under `scripts/` by what they are for: `ddd-patcher/`,
+`spray-tools/`, `other-tools/`. Paths below are relative to `scripts/`.
+Nothing imports anything else, and `DinoDDayPatcher.bat` finds its `.ps1`
+via `%~dp0`, so the groups can be rearranged without editing any script.
+
 | File | Purpose |
 |---|---|
-| `spray_encode.py` | Image → clean, checksum-tuned VTF. Optional `--pack` writes the server `.dat`. The main pipeline tool. |
-| `spraycheck.py` | Independent structural validator for VTFs, and `.dat` name generator. Re-derives expected size from the header rather than trusting the encoder — keep it independent so it can catch encoder bugs. |
-| `DinoDDayPatcher.ps1` | Interactive Windows patcher: spray junction, `autoexec.cfg` tweaks, tier0 thread-count fix. |
-| `DinoDDayPatcher.bat` | Double-click launcher for the above. Bypasses the execution policy for that one process so users never reach for `Set-ExecutionPolicy`. |
+| `spray-tools/spray_encode.py` | Image → clean, checksum-tuned VTF. Optional `--pack` writes the server `.dat`. The main pipeline tool. |
+| `spray-tools/spray_check.py` | Independent structural validator for VTFs, and `.dat` name generator. Re-derives expected size from the header rather than trusting the encoder — keep it independent so it can catch encoder bugs. |
+| `ddd-patcher/DinoDDayPatcher.ps1` | Interactive Windows patcher: spray junction, `autoexec.cfg` tweaks, tier0 thread-count fix. |
+| `ddd-patcher/DinoDDayPatcher.bat` | Double-click launcher for the above. Bypasses the execution policy for that one process so users never reach for `Set-ExecutionPolicy`. |
 | `other-tools/bsp_audit.py` | Audits Source `.bsp` maps for referenced-but-unpacked assets. Its point is the cross-map case: a path one map is missing while another map in the same run packs it, which is the suspected rotation crash. Stdlib only. Read-only except for `--extract-fixes`. Unrelated to sprays. |
 
-`vtf_encode.py` and `crc_tune.py` were merged into `spray_encode.py` and
-should not reappear.
+`spray-tools/` also holds three superseded scripts, kept only for reference:
+`vtf_encode.py` and `crc_tune.py` were merged into `spray_encode.py`, and
+`Setup-DinoSprays.ps1` did the spray junction and cache clearing that
+`DinoDDayPatcher.ps1` now does. Do not develop them further and do not route
+anything through them — `spray_encode.py` and `DinoDDayPatcher.ps1` are the
+live versions.
 
 ## DinoDDayPatcher.ps1 notes
 
@@ -269,4 +278,4 @@ should not reappear.
   the findings here came from Process Monitor, WinDbg and server logs, not
   from reasoning about what the engine "should" do.
 - When testing spray behaviour, always wipe both caches first.
-- Keep `spraycheck.py` independent of `spray_encode.py`.
+- Keep `spray_check.py` independent of `spray_encode.py`.

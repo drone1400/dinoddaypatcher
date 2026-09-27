@@ -21,7 +21,15 @@ scripts work around both.
 
 ## Scripts
 
-### `DinoDDayPatcher.ps1`
+Everything lives under `scripts/`:
+
+```
+ddd-patcher/    the patcher — spray junction, config tweaks, tier0 fix
+spray-tools/    the spray pipeline — image in, server-ready files out
+other-tools/    nothing to do with sprays; see the end of this file
+```
+
+### `ddd-patcher/DinoDDayPatcher.ps1`
 
 Interactive Windows patcher. Run it with no arguments for a menu; it finds
 your install through Steam automatically.
@@ -62,7 +70,7 @@ Three patches:
 Close the game before running — the engine caches its file search paths at
 startup.
 
-### `spray_encode.py`
+### `spray-tools/spray_encode.py`
 
 Turns an image into a ready-to-ship spray VTF.
 
@@ -82,13 +90,13 @@ different names.
 
 Requires Pillow. No native texture library needed.
 
-### `spraycheck.py`
+### `spray-tools/spray_check.py`
 
 Structural validator for VTF files, and a `.dat` filename generator.
 
 ```bash
-python spraycheck.py somefile.vtf
-python spraycheck.py --pack ./serverpack sprays/*.vtf
+python spray_check.py somefile.vtf
+python spray_check.py --pack ./serverpack sprays/*.vtf
 ```
 
 Checks the header, dimensions, format and version, and — most usefully —
@@ -153,9 +161,9 @@ travel in-band. Configure it anyway — in-band map transfers are very slow.
 
 ## Other tools
 
-Nothing to do with sprays; these live in `scripts/other-tools/`.
+Nothing to do with sprays.
 
-### `bsp_audit.py`
+### `other-tools/bsp_audit.py`
 
 Finds assets a map references but doesn't pack — and, more usefully, which of
 those are packed in *another* map of the same rotation.
